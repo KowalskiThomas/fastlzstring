@@ -70,8 +70,8 @@ jobs:
           data = json.load(open("results.json"))
           by_name = {b["metadata"]["name"]: b for b in data["benchmarks"]}
 
-          def mean_us(bench: dict) -> float | None:
-              vals: list[float] = []
+          def mean_us(bench):
+              vals = []
               for run in bench.get("runs", []):
                   vals.extend(run.get("values", []))
               return statistics.mean(vals) * 1e6 if vals else None
@@ -80,7 +80,7 @@ jobs:
           print(header)
           print("-" * len(header))
 
-          slower: list[str] = []
+          slower = []
           for name, bench in sorted(by_name.items()):
               if not name.startswith("lzstring."):
                   continue
