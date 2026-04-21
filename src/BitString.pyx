@@ -21,20 +21,26 @@
 #	Johannes Bauer <JohannesBauer@gmx.de>
 #	Thomas Kowalski <thom.kowa@gmail.com>
 
-def _swap_bit_order(x: int, bitcount: int = 8) -> int:
-	y = 0
+# cython: language_level=3, boundscheck=False, wraparound=False
+
+cdef Py_ssize_t _swap_bit_order_c(Py_ssize_t x, int bitcount) noexcept:
+	cdef Py_ssize_t y = 0
+	cdef int i
 	for i in range(bitcount):
-		if (x & (1 << i)) != 0:
-			y |= (1 << (bitcount - 1 - i))
+		if x & (1 << i):
+			y |= 1 << (bitcount - 1 - i)
 	return y
 
-class BitString():
+def _swap_bit_order(x: int, bitcount: int = 8) -> int:
+	return _swap_bit_order_c(x, bitcount)
+
+cdef class BitString:
 	_BASE64 = { char: _swap_bit_order(index, 6) for (index, char) in enumerate("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/") }
 	_URI_COMPONENT = { char: _swap_bit_order(index, 6) for (index, char) in enumerate("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-") }
 	_INV_BASE64 = { value: key for (key, value) in _BASE64.items() }
 	_INV_URI_COMPONENT = { value: key for (key, value) in _URI_COMPONENT.items() }
 
-	def __init__(self):
+	def __init__(self) -> None:
 		self._bs = bytearray()
 		self._bitlen = 0
 		self._pos = 0
@@ -43,76 +49,91 @@ class BitString():
 	def bit_len(self) -> int:
 		return self._bitlen
 
-	def seek(self, pos: int) -> None:
+	def seek(self, Py_ssize_t pos) -> None:
 		self._pos = pos
 
-	def _convpos(self, pos: int) -> tuple[int, int]:
-		(bytepos, bitpos) = divmod(pos, 8)
-		bitpos = 7 - bitpos
-		return (bytepos, bitpos)
+	cdef inline bint _get_bit_c(self, Py_ssize_t pos) noexcept:
+		cdef Py_ssize_t bytepos = pos >> 3
+		cdef int bitpos = 7 - <int>(pos & 7)
+		if bytepos < <Py_ssize_t>len(self._bs):
+			return (self._bs[bytepos] >> bitpos) & 1
+		return 0
 
-	def set_bit(self, pos: int, value: int) -> None:
-		assert(value in [ 0, 1 ])
-		(bytepos, bitpos) = self._convpos(pos)
-		missing_chars = bytepos + 1 - len(self._bs)
-		if missing_chars > 0:
-			self._bs += bytes(missing_chars)
-		if value == 0:
-			self._bs[bytepos] &= ~(1 << bitpos)
+	def get_bit(self, Py_ssize_t pos) -> bool:
+		return bool(self._get_bit_c(pos))
+
+	cdef void _set_bit_c(self, Py_ssize_t pos, bint value) noexcept:
+		cdef Py_ssize_t bytepos = pos >> 3
+		cdef int bitpos = 7 - <int>(pos & 7)
+		cdef Py_ssize_t missing = bytepos + 1 - <Py_ssize_t>len(self._bs)
+		if missing > 0:
+			self._bs += bytearray(missing)
+		if value:
+			self._bs[bytepos] |= <unsigned char>(1 << bitpos)
 		else:
-			self._bs[bytepos] |= (1 << bitpos)
-		self._bitlen = max(self._bitlen, pos + 1)
+			self._bs[bytepos] &= <unsigned char>(~(1 << bitpos))
+		if pos + 1 > self._bitlen:
+			self._bitlen = pos + 1
 
-	def get_bit(self, pos: int) -> bool:
-		(bytepos, bitpos) = self._convpos(pos)
-		if bytepos < len(self._bs):
-			return (self._bs[bytepos] & (1 << bitpos)) != 0
-		else:
-			return False
+	def set_bit(self, Py_ssize_t pos, int value) -> None:
+		assert value in (0, 1)
+		self._set_bit_c(pos, <bint>value)
 
-	def append(self, bit: int) -> None:
-		assert(bit in [ 0, 1 ])
-		self.set_bit(self._bitlen, bit)
+	def append(self, int bit) -> None:
+		assert bit in (0, 1)
+		self._set_bit_c(self._bitlen, <bint>bit)
 
-	def append_value(self, value: int, bitcount: int) -> None:
+	cpdef void append_value(self, Py_ssize_t value, int bitcount):
+		cdef int i
+		cdef Py_ssize_t bytepos
+		cdef int bitpos
+		cdef Py_ssize_t needed = (self._bitlen + bitcount + 7) // 8 - <Py_ssize_t>len(self._bs)
+		if needed > 0:
+			self._bs += bytearray(needed)
 		for i in range(bitcount):
-			if (1 << i) & value:
-				self.append(1)
+			bytepos = self._bitlen >> 3
+			bitpos = 7 - <int>(self._bitlen & 7)
+			if value & (1 << i):
+				self._bs[bytepos] |= <unsigned char>(1 << bitpos)
 			else:
-				self.append(0)
+				self._bs[bytepos] &= <unsigned char>(~(1 << bitpos))
+			self._bitlen += 1
 
 	@property
 	def remaining_bits(self) -> int:
 		return self._bitlen - self._pos
 
-	def read_bits(self, count: int) -> int:
-		result = 0
+	cpdef Py_ssize_t read_bits(self, int count):
+		cdef Py_ssize_t result = 0
+		cdef int i
 		for i in range(count):
-			result |= self.get_bit(self._pos + i) << i
+			if self._get_bit_c(self._pos + i):
+				result |= <Py_ssize_t>(1 << i)
 		self._pos += count
 		return result
 
-	def read_chars(self, count: int) -> bytearray:
+	def read_chars(self, int count) -> bytearray:
+		cdef int i
 		result = bytearray(count)
 		for i in range(count):
 			result[i] = self.read_bits(8)
 		return result
 
 	@classmethod
-	def _from_6bit_alphabet(cls, input_text: str, alphabet: dict) -> "BitString":
-		assert(len(alphabet) == 64)
-		bitstring = BitString()
+	def _from_6bit_alphabet(cls, str input_text, dict alphabet):
+		cdef BitString bitstring = BitString()
+		cdef Py_ssize_t bits
 		for char in input_text:
 			if char not in alphabet:
 				break
-			else:
-				bitstring.append_value(alphabet[char], 6)
+			bits = alphabet[char]
+			bitstring.append_value(bits, 6)
 		return bitstring
 
-	def _to_6bit_alphabet(self, alphabet: dict) -> str:
-		assert(len(alphabet) == 64)
-		char_count = (self.bit_len + 5) // 6
-		result = [ ]
+	def _to_6bit_alphabet(self, dict alphabet) -> str:
+		cdef Py_ssize_t char_count = (self._bitlen + 5) // 6
+		cdef Py_ssize_t charno, index
+		result = []
 		self.seek(0)
 		for charno in range(char_count):
 			index = self.read_bits(6)
@@ -120,28 +141,28 @@ class BitString():
 		return "".join(result)
 
 	@classmethod
-	def from_base64(cls, input_text: str) -> "BitString":
+	def from_base64(cls, str input_text):
 		return cls._from_6bit_alphabet(input_text, cls._BASE64)
 
 	@classmethod
-	def from_url_component(cls, input_text: str) -> "BitString":
+	def from_url_component(cls, str input_text):
 		return cls._from_6bit_alphabet(input_text, cls._URI_COMPONENT)
 
 	@classmethod
-	def from_bit_text(cls, text: str) -> "BitString":
-		bitstring = BitString()
+	def from_bit_text(cls, str text):
+		cdef BitString bitstring = BitString()
 		for char in text:
 			if char == "0":
-				bitstring.append(0)
+				bitstring._set_bit_c(bitstring._bitlen, 0)
 			elif char == "1":
-				bitstring.append(1)
+				bitstring._set_bit_c(bitstring._bitlen, 1)
 		return bitstring
 
 	@classmethod
-	def from_bytes(cls, data: bytes) -> "BitString":
-		bitstring = BitString()
+	def from_bytes(cls, bytes data):
+		cdef BitString bitstring = BitString()
 		bitstring._bs = bytearray(data)
-		bitstring._bitlen = len(data) * 8
+		bitstring._bitlen = <Py_ssize_t>len(data) * 8
 		return bitstring
 
 	def to_base64(self) -> str:
@@ -151,13 +172,16 @@ class BitString():
 		return self._to_6bit_alphabet(self._INV_URI_COMPONENT)
 
 	def to_text(self) -> str:
-		return "".join("1" if self.get_bit(i) else "0" for i in range(self._bitlen))
+		cdef Py_ssize_t i
+		return "".join("1" if self._get_bit_c(i) else "0" for i in range(self._bitlen))
 
 	def __bytes__(self) -> bytes:
 		return bytes(self._bs)
 
-	def __eq__(self, other: object) -> bool:
-		return (self._bitlen == other._bitlen) and (self._bs == other._bs)
+	def __eq__(self, object other) -> bool:
+		if not isinstance(other, BitString):
+			return NotImplemented
+		return (self._bitlen == (<BitString>other)._bitlen) and (self._bs == (<BitString>other)._bs)
 
 	def __repr__(self) -> str:
 		return f"BitString<{self._bitlen} bits: {self.to_text()}>"

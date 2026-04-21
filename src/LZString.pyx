@@ -21,17 +21,37 @@
 #	Johannes Bauer <JohannesBauer@gmx.de>
 #	Thomas Kowalski <thom.kowa@gmail.com>
 
-import enum
-from .BitString import BitString
+# cython: language_level=3
+
+from lzstr.BitString cimport BitString
+from .BitString import BitString as _BitString
 from .Exceptions import LZStringDecompressionException
 
-class SpecialTokens(enum.IntEnum):
-	LiteralByte = 0
-	LiteralWord = 1
-	EndOfStream = 2
+# Compile-time constants replacing the SpecialTokens enum
+DEF LITERAL_BYTE   = 0
+DEF LITERAL_WORD   = 1
+DEF END_OF_STREAM  = 2
 
-class LZStringDecompressor():
-	def __init__(self, bs: BitString) -> None:
+import enum
+
+class SpecialTokens(enum.IntEnum):
+	LiteralByte  = LITERAL_BYTE
+	LiteralWord  = LITERAL_WORD
+	EndOfStream  = END_OF_STREAM
+
+cdef inline int _c_bit_length(unsigned int n) noexcept:
+	cdef int r = 0
+	while n:
+		n >>= 1
+		r += 1
+	return r
+
+
+cdef class LZStringDecompressor:
+	cdef BitString _bs
+	cdef object _result  # bytearray or None
+
+	def __init__(self, BitString bs) -> None:
 		self._bs = bs
 		self._result = None
 
@@ -39,54 +59,65 @@ class LZStringDecompressor():
 		if self._result is not None:
 			return self._result
 
-		self._bs.seek(0)
-		cdict = { i: None for i in range(3) }
+		cdef dict cdict = {0: None, 1: None, 2: None}
+		cdef int token_bits, token
+		cdef object data, last_data
 
+		self._bs.seek(0)
 		self._result = bytearray()
 		last_data = None
 		while True:
-			token_bits = len(cdict).bit_length()
+			token_bits = _c_bit_length(<unsigned int>len(cdict))
 			if self._bs.remaining_bits < token_bits:
-				raise LZStringDecompressionException(f"Unexpected end of compressed stream: need {token_bits} bits but only {self._bs.remaining_bits} remain")
+				raise LZStringDecompressionException(
+					f"Unexpected end of compressed stream: need {token_bits} bits "
+					f"but only {self._bs.remaining_bits} remain"
+				)
 
-			token = self._bs.read_bits(token_bits)
-			if token in [ SpecialTokens.LiteralByte, SpecialTokens.LiteralWord ]:
+			token = <int>self._bs.read_bits(token_bits)
+			if token == LITERAL_BYTE or token == LITERAL_WORD:
 				data = bytes(self._bs.read_chars(token + 1))
 				cdict[len(cdict)] = data
-			elif token == SpecialTokens.EndOfStream:
+			elif token == END_OF_STREAM:
 				return self._result
 			else:
 				if token in cdict:
 					data = cdict[token]
 				elif token == len(cdict):
-					data = last_data + bytearray([ last_data[0] ])
+					data = last_data + bytearray([last_data[0]])
 				else:
-					raise LZStringDecompressionException(f"token {token} is not in compression dictionary: {cdict}")
+					raise LZStringDecompressionException(
+						f"token {token} is not in compression dictionary: {cdict}"
+					)
 
 			self._result += data
 			if last_data is not None:
-				cdict[len(cdict)] = bytes(last_data + bytes([ data[0] ]))
+				cdict[len(cdict)] = bytes(last_data + bytes([data[0]]))
 			last_data = data
 
 	@classmethod
-	def decompress_from_bytes(cls, data: bytes) -> bytearray:
-		bitstring = BitString.from_bytes(data)
-		return cls(bitstring).decompress()
+	def decompress_from_bytes(cls, bytes data) -> bytearray:
+		return cls(_BitString.from_bytes(data)).decompress()
 
 	@classmethod
-	def decompress_from_base64(cls, b64data: str) -> bytearray:
-		bitstring = BitString.from_base64(b64data)
-		return cls(bitstring).decompress()
+	def decompress_from_base64(cls, str b64data) -> bytearray:
+		return cls(_BitString.from_base64(b64data)).decompress()
 
 	@classmethod
-	def decompress_from_url_component(cls, urlcomponent: str, escape: bool = True) -> bytearray:
+	def decompress_from_url_component(cls, str urlcomponent, bint escape = True) -> bytearray:
 		if not escape:
 			urlcomponent = urlcomponent.replace(" ", "+")
-		bitstring = BitString.from_url_component(urlcomponent)
-		return cls(bitstring).decompress()
+		return cls(_BitString.from_url_component(urlcomponent)).decompress()
 
-class LZStringCompressor():
-	def __init__(self, data: bytes) -> None:
+
+cdef class LZStringCompressor:
+	cdef bytes _data
+	cdef dict _cdict
+	cdef set _not_emitted_yet
+	cdef BitString _result
+	cdef int _dictsize
+
+	def __init__(self, bytes data) -> None:
 		self._data = data
 		self._cdict = None
 		self._not_emitted_yet = set()
@@ -95,29 +126,31 @@ class LZStringCompressor():
 
 	@property
 	def token_bits(self) -> int:
-		token_bits = (self._dictsize - 1).bit_length()
-		return token_bits
+		return _c_bit_length(<unsigned int>(self._dictsize - 1))
 
-	def _emit(self, pattern: bytes) -> None:
+	cdef void _emit(self, bytes pattern):
+		cdef int tb = _c_bit_length(<unsigned int>(self._dictsize - 1))
 		if pattern in self._not_emitted_yet:
-			self._not_emitted_yet.remove(pattern)
-			self._result.append_value(SpecialTokens.LiteralByte, self.token_bits)
+			self._not_emitted_yet.discard(pattern)
+			self._result.append_value(LITERAL_BYTE, tb)
 			self._result.append_value(pattern[0], 8)
 			self._dictsize += 2
 		else:
-			self._result.append_value(self._cdict[pattern], self.token_bits)
+			self._result.append_value(self._cdict[pattern], tb)
 			self._dictsize += 1
 
 	def compress(self) -> BitString:
 		if self._result is not None:
 			return self._result
 
-		self._result = BitString()
-		self._cdict = { }
+		cdef bytes substring, combined_pattern
+		cdef bytes pattern = b""
 
-		pattern = b""
-		for substring in self._data:
-			substring = bytes([ substring ])
+		self._result = _BitString()
+		self._cdict = {}
+
+		for byte_val in self._data:
+			substring = bytes([byte_val])
 
 			if substring not in self._cdict:
 				self._not_emitted_yet.add(substring)
@@ -134,24 +167,21 @@ class LZStringCompressor():
 		if len(pattern) > 0:
 			self._emit(pattern)
 
-		self._result.append_value(SpecialTokens.EndOfStream, self.token_bits)
+		self._result.append_value(END_OF_STREAM, _c_bit_length(<unsigned int>(self._dictsize - 1)))
 		self._cdict = None
 		return self._result
 
 	@classmethod
-	def compress_to_bytes(cls, data: bytes) -> bytes:
-		bitstring = cls(data).compress()
-		return bytes(bitstring)
+	def compress_to_bytes(cls, bytes data) -> bytes:
+		return bytes(cls(data).compress())
 
 	@classmethod
-	def compress_to_base64(cls, data: bytes) -> str:
-		bitstring = cls(data).compress()
-		return bitstring.to_base64()
+	def compress_to_base64(cls, bytes data) -> str:
+		return cls(data).compress().to_base64()
 
 	@classmethod
-	def compress_to_url_component(cls, data: bytes, escape: bool = True) -> str:
-		bitstring = cls(data).compress()
-		result = bitstring.to_url_component()
+	def compress_to_url_component(cls, bytes data, bint escape = True) -> str:
+		result = cls(data).compress().to_url_component()
 		if not escape:
 			result = result.replace("+", " ")
 		return result

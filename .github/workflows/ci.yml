@@ -59,23 +59,54 @@ jobs:
               print(f"OK: {mod} -> {f}")
           EOF
 
-      - name: Run lzstring (reference) benchmarks
-        env:
-          BENCH_SUITE: lzstring
-        run: python benchmarks.py --fast -o ref.json
+      - name: Run benchmarks (both suites)
+        run: python benchmarks.py --fast -o results.json
 
-      - name: Run lzstr benchmarks
-        env:
-          BENCH_SUITE: lzstr
-        run: python benchmarks.py --fast -o candidate.json
+      - name: Compare lzstr vs lzstring
+        run: |
+          python - <<'EOF'
+          import json, statistics, sys
 
-      - name: Compare results
-        run: python -m pyperf compare_to ref.json candidate.json
+          data = json.load(open("results.json"))
+          by_name = {b["metadata"]["name"]: b for b in data["benchmarks"]}
+
+          def mean_us(bench):
+              vals = []
+              for run in bench.get("runs", []):
+                  vals.extend(run.get("values", []))
+              return statistics.mean(vals) * 1e6 if vals else None
+
+          header = f"{'Benchmark':<45} {'lzstring':>12} {'lzstr':>12} {'speedup':>10}"
+          print(header)
+          print("-" * len(header))
+
+          slower = []
+          for name, bench in sorted(by_name.items()):
+              if not name.startswith("lzstring."):
+                  continue
+              lzstr_name = name.replace("lzstring.", "lzstr.", 1)
+              if lzstr_name not in by_name:
+                  continue
+              ref_us = mean_us(bench)
+              cand_us = mean_us(by_name[lzstr_name])
+              if ref_us is None or cand_us is None:
+                  continue
+              speedup = ref_us / cand_us
+              label = name.removeprefix("lzstring.")
+              flag = "  <-- SLOWER" if speedup < 1.0 else ""
+              print(f"{label:<45} {ref_us:>10.1f}us {cand_us:>10.1f}us {speedup:>8.2f}x{flag}")
+              if speedup < 1.0:
+                  slower.append(label)
+
+          if slower:
+              print(f"\nWARNING: lzstr is slower than lzstring on: {', '.join(slower)}", file=sys.stderr)
+              sys.exit(1)
+          else:
+              print("\nlzstr is faster than lzstring on all measured benchmarks.")
+          EOF
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-results-${{ matrix.python-version }}
-          path: |
-            ref.json
-            candidate.json
+          path: results.json
