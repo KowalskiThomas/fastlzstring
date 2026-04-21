@@ -7,8 +7,8 @@ name = "lzstring-fast"
 version = "0.0.1rc0"
 requires-python = ">=3.9"
 
-[tool.setuptools.packages]
-find = {where = ["."]}
+[tool.setuptools]
+packages = ["lzstr", "lzstr.tests"]
 
 [tool.setuptools.package-dir]
 lzstr = "src"
