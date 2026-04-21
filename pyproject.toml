@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools", "cython"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lzstring-fast"
+version = "0.0.1rc0"
+requires-python = ">=3.9"
+
+[tool.setuptools.packages]
+find = {where = ["."]}
+
+[tool.setuptools.package-dir]
+lzstr = "src"
