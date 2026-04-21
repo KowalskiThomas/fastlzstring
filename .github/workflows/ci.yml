@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package
+        run: pip install cython setuptools && pip install -e .
+
+      - name: Run tests
+        run: python -m unittest discover -s src/tests -p "*Tests.py" -v
+
+  benchmarks:
+    name: Benchmarks (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package
+        run: pip install cython setuptools pyperf lzstring && pip install -e .
+
+      - name: Verify Cython extensions are loaded
+        run: |
+          python - <<'EOF'
+          import importlib, pathlib
+          for mod in ("lzstr.BitString", "lzstr.LZString", "lzstr.Exceptions"):
+              m = importlib.import_module(mod)
+              f = pathlib.Path(m.__file__)
+              assert f.suffix in (".so", ".pyd"), f"{mod} loaded from {f} — expected a compiled extension!"
+              print(f"OK: {mod} -> {f}")
+          EOF
+
+      - name: Run lzstring (reference) benchmarks
+        env:
+          BENCH_SUITE: lzstring
+        run: python benchmarks.py --fast -o ref.json
+
+      - name: Run lzstr benchmarks
+        env:
+          BENCH_SUITE: lzstr
+        run: python benchmarks.py --fast -o candidate.json
+
+      - name: Compare results
+        run: python -m pyperf compare_to ref.json candidate.json
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ matrix.python-version }}
+          path: |
+            ref.json
+            candidate.json

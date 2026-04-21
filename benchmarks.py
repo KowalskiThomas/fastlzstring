@@ -3,9 +3,18 @@ Benchmarks comparing lzstr (this package) vs lzstring (PyPI) for
 compress/decompress operations across different data sizes and types.
 
 Run with:
-    python benchmarks.py
-    python benchmarks.py --worker  # single worker pass (used internally by pyperf)
+    python benchmarks.py                              # both suites, prefixed names
+    BENCH_SUITE=lzstring python benchmarks.py         # reference suite only
+    BENCH_SUITE=lzstr    python benchmarks.py         # this package only
+    python benchmarks.py --worker                     # single worker pass (used internally by pyperf)
+
+To compare the two suites:
+    BENCH_SUITE=lzstring python benchmarks.py --fast -o ref.json
+    BENCH_SUITE=lzstr    python benchmarks.py --fast -o candidate.json
+    python -m pyperf compare_to ref.json candidate.json
 """
+
+import os
 
 import pyperf
 import lzstring as _lzstring
@@ -93,41 +102,56 @@ def bench_lzstr_compress_bytes(loops: int, data: bytes) -> float:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    # Use an environment variable so pyperf worker subprocesses automatically
+    # inherit the setting (stripping it from sys.argv causes task-index mismatches
+    # between the main process and its workers).
+    suite = os.environ.get("BENCH_SUITE", "both")
+    if suite not in ("lzstring", "lzstr", "both"):
+        raise ValueError(f"BENCH_SUITE must be one of lzstring/lzstr/both, got {suite!r}")
+
+    # When running a single suite, omit the library prefix so that benchmark
+    # names match across the two output files and pyperf compare_to can pair them.
+    lzstring_prefix = "" if suite == "lzstring" else "lzstring."
+    lzstr_prefix = "" if suite == "lzstr" else "lzstr."
+
     runner = pyperf.Runner()
 
     for label, text, data_bytes in _DATASETS:
         lzstring_compressed, lzstr_compressed = _PRECOMPRESSED[label]
 
-        runner.bench_time_func(
-            f"lzstring.compressToBase64 [{label}]",
-            bench_lzstring_compress_base64,
-            text,
-        )
-        runner.bench_time_func(
-            f"lzstr.compress_to_base64 [{label}]",
-            bench_lzstr_compress_base64,
-            data_bytes,
-        )
-        runner.bench_time_func(
-            f"lzstring.decompressFromBase64 [{label}]",
-            bench_lzstring_decompress_base64,
-            lzstring_compressed,
-        )
-        runner.bench_time_func(
-            f"lzstr.decompress_from_base64 [{label}]",
-            bench_lzstr_decompress_base64,
-            lzstr_compressed,
-        )
-        runner.bench_time_func(
-            f"lzstring.compress (raw) [{label}]",
-            bench_lzstring_compress_bytes,
-            text,
-        )
-        runner.bench_time_func(
-            f"lzstr.compress_to_bytes [{label}]",
-            bench_lzstr_compress_bytes,
-            data_bytes,
-        )
+        if suite in ("lzstring", "both"):
+            runner.bench_time_func(
+                f"{lzstring_prefix}compress_base64 [{label}]",
+                bench_lzstring_compress_base64,
+                text,
+            )
+            runner.bench_time_func(
+                f"{lzstring_prefix}decompress_base64 [{label}]",
+                bench_lzstring_decompress_base64,
+                lzstring_compressed,
+            )
+            runner.bench_time_func(
+                f"{lzstring_prefix}compress_raw [{label}]",
+                bench_lzstring_compress_bytes,
+                text,
+            )
+
+        if suite in ("lzstr", "both"):
+            runner.bench_time_func(
+                f"{lzstr_prefix}compress_base64 [{label}]",
+                bench_lzstr_compress_base64,
+                data_bytes,
+            )
+            runner.bench_time_func(
+                f"{lzstr_prefix}decompress_base64 [{label}]",
+                bench_lzstr_decompress_base64,
+                lzstr_compressed,
+            )
+            runner.bench_time_func(
+                f"{lzstr_prefix}compress_raw [{label}]",
+                bench_lzstr_compress_bytes,
+                data_bytes,
+            )
 
 
 if __name__ == "__main__":
